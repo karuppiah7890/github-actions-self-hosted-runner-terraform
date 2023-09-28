@@ -22,3 +22,11 @@ The set of AWS credentials - `AWS_ACCESS_KEY` and `AWS_SECRET_KEY` - should have
 ## Example workflow
 
 You can find an example workflow under `.github/workflows`
+
+## Amazon Machine Image
+
+- Install required software in it. For example, the softwares we required for the example workflow (that we use) are -
+  - `jq`
+  - `docker` engine and `docker` CLI
+  - `unzip`
+  - GitHub Actions Runner software - get it from - https://github.com/actions/runner/releases
