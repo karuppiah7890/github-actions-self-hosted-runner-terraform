@@ -1,0 +1,62 @@
+sequenceDiagram
+    autonumber
+    actor Developer
+
+    create participant GitHub
+    %% Developer pushes code to a branch using `git push`
+    Developer->>GitHub: git push
+
+    create participant GitHub Actions
+    %% The `git push` triggers a GitHub Actions Workflow
+    GitHub->>GitHub Actions: Trigger Workflow
+
+    create participant GitHub Hosted Runner 1
+    %% Assign Job 1 to GitHub Hosted Runner
+    GitHub Actions->>GitHub Hosted Runner 1: Run "Start EC2 Runner" Job
+
+    %% As part of Job 1 - Create AWS EC2 for Self Hosted Runner
+    GitHub Hosted Runner 1->>AWS: Create AWS EC2 instance for Self Hosted Runner
+    create participant Self Hosted Runner
+    AWS->>Self Hosted Runner: Start EC2 instance
+    AWS->>GitHub Hosted Runner 1: AWS EC2 instance for Self Hosted Runner created
+    
+    %% AWS EC2 starts and registers itself as runner for the repo
+    Self Hosted Runner->>GitHub Actions: Register as Runner to the GitHub Repository
+    GitHub Actions->>Self Hosted Runner: Runner Registration successful
+    
+    GitHub Hosted Runner 1->>GitHub Actions: Check if Self Hosted Runner Registration is successful
+    GitHub Actions->>GitHub Hosted Runner 1: Self Hosted Runner Registration is successful
+
+    destroy GitHub Hosted Runner 1
+    %% Job 1 done
+    GitHub Hosted Runner 1->>GitHub Actions: "Start EC2 Runner" Job Done
+    
+    %% Assign Job 2 to Self Hosted Runner
+    %% As part of Job 2 - Run the actual CI/CD tasks (lint, build, test etc)
+    GitHub Actions->>Self Hosted Runner: Run CI/CD tasks
+    
+    %% Job 2 done
+    Self Hosted Runner->>GitHub Actions: CI/CD tasks Done
+
+    create participant GitHub Hosted Runner 2
+    %% Assign Job 3 to GitHub Hosted Runner
+    GitHub Actions->>GitHub Hosted Runner 2: Run "Stop EC2 Runner" Job
+    
+    %% As part of Job 3 - Terminate AWS EC2 Self Hosted Runner. Deregister the runner from the repo
+    GitHub Hosted Runner 2->>AWS: Terminate Self Hosted Runner
+    destroy Self Hosted Runner
+    AWS->>Self Hosted Runner: Terminate EC2 instance
+    AWS->>GitHub Hosted Runner 2: Terminated Self Hosted Runner
+    GitHub Hosted Runner 2->>GitHub Actions: Deregister Self Hosted Runner from the GitHub Repository
+    GitHub Actions->>GitHub Hosted Runner 2: Self Hosted Runner Deregistration successful
+
+    destroy GitHub Hosted Runner 2
+    %% Job 3 done
+    GitHub Hosted Runner 2->>GitHub Actions: "Stop EC2 Runner" Job Done
+    
+    destroy GitHub Actions
+    %% Workflow Completed
+    GitHub Actions->>GitHub: Workflow Completed
+
+    destroy GitHub
+    GitHub->>Developer: All Checks Passed

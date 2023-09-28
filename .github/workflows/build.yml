@@ -1,0 +1,170 @@
+# This is a reusable workflow, hence the workflow_call details for calling the workflow
+
+name: Build and Publish
+
+on:
+  workflow_call:
+    inputs:
+      ec2-instance-type:
+        description: 'Type of the EC2 instance, for example t3a.large'
+        required: true
+        type: string
+      s3-service-directory-path:
+        description: 'Path of the service directory in S3 which contains all the build artifacts'
+        required: true
+        type: string
+      java-version:
+        description: 'Version of Java to be installed and setup'
+        required: true
+        type: string
+
+jobs:
+  start-runner:
+    name: Start self-hosted EC2 runner
+    runs-on: ubuntu-latest
+    outputs:
+      label: ${{ steps.start-ec2-runner.outputs.label }}
+      ec2-instance-id: ${{ steps.start-ec2-runner.outputs.ec2-instance-id }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.RUNNER_MANAGER_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.RUNNER_MANAGER_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.RUNNER_MANAGER_AWS_REGION }}
+
+      - name: Start EC2 runner
+        id: start-ec2-runner
+        uses: karuppiah7890/ec2-github-runner@d4c1e82c47b704ece2166bffa05b6316816962a8
+        with:
+          mode: start
+          github-token: ${{ secrets.RUNNER_MANAGER_GH_PERSONAL_ACCESS_TOKEN }}
+          ec2-image-id: ami-11223344556677889
+          ec2-instance-type: ${{ inputs.ec2-instance-type }}
+          subnet-id: ${{ secrets.RUNNER_MANAGER_SUBNET_ID }}
+          security-group-id: ${{ secrets.RUNNER_MANAGER_SECURITY_GROUP_ID }}
+          runner-home-dir: /home/ubuntu/actions-runner
+          assign-public-ip-to-instance: 'true'
+          is-spot-instance: 'false'
+          aws-resource-tags: '[{"Key":"Feature", "Value":"Continuous Integration"},{"Key":"Repository", "Value":"${{ github.repository }}"}]'
+
+  build:
+    needs: start-runner # required to start the main job when the runner is ready
+    runs-on: ${{ needs.start-runner.outputs.label }} # run the job on the newly created runner
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          submodules: 'recursive'
+          ssh-key: ${{ secrets.GIT_CLONE_SSH_KEY }}
+
+      - name: Set up JDK ${{ inputs.java-version }}
+        uses: actions/setup-java@v3.10.0
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: 'temurin'
+
+      - name: Run Any Components Required for Build
+        shell: bash
+        run: |
+          FILE="docker-compose.yml"
+          if test -f "$FILE"; then
+            docker compose up --detach --wait --wait-timeout 60
+          else
+            echo "$FILE not found. Assuming there are no components to run"
+          fi
+
+      - name: Build with Gradle
+        uses: gradle/gradle-build-action@v2
+        with:
+          gradle-version: 6.9.2
+          arguments: build
+
+      - name: Upload build reports as a workflow artifact
+        uses: actions/upload-artifact@v3
+        if: ${{ always() }}
+        with:
+          name: build-reports
+          path: build/reports
+
+      - name: Upload JaCoCo coverage report as a workflow artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: jacoco-report
+          path: build/jacoco/test/jacocoTestReport.csv
+
+      - name: Configure AWS CLI
+        if: ${{ !startsWith(github.ref, 'refs/pull/') }}
+        shell: bash
+        env:
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_region: ${{ secrets.AWS_REGION }}
+        run: |
+          aws_install_rc=/tmp/aws-install-rc
+          echo 'function aws() {
+            docker run --rm -v $HOME/.aws:/root/.aws -v $(pwd):/aws public.ecr.aws/aws-cli/aws-cli@sha256:06f95828509d83f5899d373e054ab1ed91dc84b03cf665f755b668cbaf38b822 ${@}
+          }' > $aws_install_rc
+          source $aws_install_rc
+          aws configure set aws_access_key_id $aws_access_key_id
+          aws configure set aws_secret_access_key $aws_secret_access_key
+          aws configure set default.region $aws_region
+
+      - name: Check if commit is already built and pushed
+        id: check-commit-already-built-and-pushed
+        if: ${{ !startsWith(github.ref, 'refs/pull/') }}
+        shell: bash
+        env:
+          aws_s3_bucket: ${{ secrets.S3_BUCKET }}
+        run: |
+          source /tmp/aws-install-rc
+          count=$(aws s3api list-objects-v2 --bucket $aws_s3_bucket --prefix ${{ inputs.s3-service-directory-path }}/builds/${{ github.sha }}.jar | jq '.Contents | length')
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Fat Jar
+        if: ${{ steps.check-commit-already-built-and-pushed.outputs.count == 0 && !startsWith(github.ref, 'refs/pull/') }}
+        uses: gradle/gradle-build-action@v2
+        with:
+          arguments: shadowJar
+
+      - name: Publish Fat Jar
+        if: ${{ steps.check-commit-already-built-and-pushed.outputs.count == 0 && !startsWith(github.ref, 'refs/pull/') }}
+        shell: bash
+        env:
+          aws_s3_bucket: ${{ secrets.S3_BUCKET }}
+        run: |
+          source /tmp/aws-install-rc
+          if [ $(ls build/libs/*.jar -1 | wc -l) -gt 1 ]; then JAR_FILE=$(ls build/libs/*-all.jar); echo $JAR_FILE; else JAR_FILE=$(ls build/libs/*.jar); echo $JAR_FILE; fi
+          aws s3api put-object --metadata CommitSha=${{ github.sha }} --bucket $aws_s3_bucket --key ${{ inputs.s3-service-directory-path }}/builds/${{ github.sha }}.jar --body $JAR_FILE
+
+      - name: Update Latest Fat Jar
+        if: ${{ !startsWith(github.ref, 'refs/pull/') }}
+        shell: bash
+        env:
+          aws_s3_bucket: ${{ secrets.S3_BUCKET }}
+        run: |
+          source /tmp/aws-install-rc
+          aws s3api copy-object --metadata-directive COPY --copy-source $aws_s3_bucket/${{ inputs.s3-service-directory-path }}/builds/${{ github.sha }}.jar --bucket $aws_s3_bucket --key ${{ inputs.s3-service-directory-path }}/${{ github.ref_name }}.jar
+
+  stop-runner:
+    name: Stop self-hosted EC2 runner
+    needs:
+      - start-runner # required to get output from the start-runner job
+      - build # required to wait when the main job is done
+    runs-on: ubuntu-latest
+    if: ${{ always() }} # required to stop the runner even if the error happened in the previous jobs
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v3
+        with:
+          aws-access-key-id: ${{ secrets.RUNNER_MANAGER_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.RUNNER_MANAGER_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.RUNNER_MANAGER_AWS_REGION }}
+
+      - name: Stop EC2 runner
+        uses: karuppiah7890/ec2-github-runner@d4c1e82c47b704ece2166bffa05b6316816962a8
+        with:
+          mode: stop
+          github-token: ${{ secrets.RUNNER_MANAGER_GH_PERSONAL_ACCESS_TOKEN }}
+          label: ${{ needs.start-runner.outputs.label }}
+          ec2-instance-id: ${{ needs.start-runner.outputs.ec2-instance-id }}

@@ -1,0 +1,12 @@
+version: '3.8'
+services:
+  github:
+    container_name: togai-terraform-github
+    image: hashicorp/terraform@sha256:3c11f578df8a3af4524d7b2afd03563ded8265543f105b190d5156f5dc0d20f7 # version 1.5.5 https://hub.docker.com/layers/hashicorp/terraform/1.5.5/images/sha256-3c11f578df8a3af4524d7b2afd03563ded8265543f105b190d5156f5dc0d20f7?context=explore
+    entrypoint: ["/bin/sh", "-c", "sleep infinity"]
+    env_file:
+      - ./github/configs.env
+    working_dir: /terraform/github/src
+    volumes:
+      - .:/terraform
+      - ./github/states:/terraform-states/github/
